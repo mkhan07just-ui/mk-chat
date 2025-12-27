@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MK Chat</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: 'Segoe UI', sans-serif; background: #f0f2f5; }
+  .hidden { display: none !important; }
+  .chat-bg { background-color: #e5ddd5; }
+  .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+  .custom-scrollbar::-webkit-scrollbar-thumb { background: #ccc; border-radius: 10px; }
+</style>
+</head>
+<body class="h-screen overflow-hidden">
+
+<!-- AUTH SCREEN -->
+<div id="auth-screen" class="flex items-center justify-center h-full">
+  <div class="bg-white p-8 rounded-lg shadow-md w-full max-w-md text-center">
+    <h2 class="text-2xl font-bold mb-4 text-[#075E54]">MK Chat</h2>
+    <input type="text" id="phone" placeholder="Phone Number (+91xxxxxxxxxx)" class="w-full p-3 border rounded mb-2 focus:outline-none focus:ring-2 focus:ring-[#075E54]">
+    <button id="send-otp-btn" class="w-full bg-[#075E54] text-white p-3 rounded font-bold hover:bg-[#054d44] mb-2">Send OTP</button>
+    <input type="text" id="otp" placeholder="Enter OTP" class="w-full p-3 border rounded mb-2 hidden focus:outline-none focus:ring-2 focus:ring-[#075E54]">
+    <button id="verify-otp-btn" class="w-full bg-[#075E54] text-white p-3 rounded font-bold hover:bg-[#054d44] hidden">Verify OTP</button>
+    <p id="auth-error" class="text-red-500 text-sm mt-2"></p>
+    <div id="recaptcha-container"></div>
+  </div>
+</div>
+
+<!-- APP SCREEN -->
+<div id="app-screen" class="hidden h-full flex flex-col md:flex-row max-w-[1600px] mx-auto bg-white shadow-2xl">
+  <!-- Sidebar -->
+  <div id="sidebar" class="w-full md:w-1/3 lg:w-1/4 border-r flex flex-col bg-white z-20">
+    <div class="p-4 bg-[#ededed] flex justify-between items-center border-b">
+      <div class="flex items-center space-x-2">
+        <div id="my-avatar" class="w-10 h-10 bg-gray-400 rounded-full flex items-center justify-center text-white font-bold">U</div>
+        <span id="my-name" class="font-semibold text-sm truncate max-w-[100px]">Me</span>
+      </div>
+      <button onclick="logout()" class="text-red-600 font-semibold text-sm px-3 py-1 hover:bg-red-50 rounded">Logout</button>
+    </div>
+    <div class="p-3 bg-gray-50 border-b">
+      <p class="text-xs font-bold text-gray-500 uppercase tracking-wider">Select a user to chat</p>
+    </div>
+    <div id="user-list" class="flex-1 overflow-y-auto custom-scrollbar"></div>
+  </div>
+
+  <!-- Chat Window -->
+  <div id="chat-window" class="flex-1 flex flex-col relative chat-bg">
+    <div id="no-chat-selected" class="absolute inset-0 z-10 flex flex-col items-center justify-center bg-[#f8f9fa] text-center p-4">
+      <h2 class="text-2xl font-light text-gray-600">MK Chat</h2>
+      <p class="text-gray-500 mt-2">Select a user from the left to start messaging.</p>
+    </div>
+    <div id="chat-header" class="hidden p-3 bg-[#ededed] flex items-center border-b z-10">
+      <button onclick="backToSidebar()" class="md:hidden mr-3 text-[#075E54]">←</button>
+      <div id="target-avatar" class="w-10 h-10 bg-[#075E54] rounded-full flex items-center justify-center text-white font-bold mr-3">?</div>
+      <div>
+        <h3 id="target-name" class="font-bold leading-tight">Name</h3>
+        <p class="text-xs text-gray-500">Online</p>
+      </div>
+    </div>
+
+    <div id="messages-container" class="flex-1 overflow-y-auto p-4 md:p-10 space-y-2 custom-scrollbar flex flex-col"></div>
+
+    <div id="input-area" class="hidden p-3 bg-[#f0f0f0] flex items-center space-x-2 z-10">
+      <input type="text" id="msg-input" placeholder="Type a message" class="flex-1 p-2.5 rounded-lg border-none focus:outline-none">
+      <button onclick="sendMessage()" class="bg-[#075E54] text-white p-2.5 rounded-full hover:bg-[#054d44]">Send</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+import { getAuth, RecaptchaVerifier, signInWithPhoneNumber, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+import { getFirestore, setDoc, doc, collection, getDocs, addDoc, query, where, orderBy, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBBnKxjqzrGk07UlF03e6xM1IC7MKP6-sM",
+  authDomain: "mk-chat-web.firebaseapp.com",
+  projectId: "mk-chat-web",
+  storageBucket: "mk-chat-web.appspot.com",
+  messagingSenderId: "491809346044",
+  appId: "1:491809346044:web:2db28bbecc3a008135a279"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+let currentUser = null;
+let selectedUserId = null;
+let unsubscribeMessages = null;
+let confirmationResult;
+
+// Invisible Recaptcha
+window.recaptchaVerifier = new RecaptchaVerifier('recaptcha-container', { 'size': 'invisible' }, auth);
+
+// Send OTP
+document.getElementById('send-otp-btn').onclick = async () => {
+  const phone = document.getElementById('phone').value.trim();
+  if (!phone) return alert("Enter phone number");
+  confirmationResult = await signInWithPhoneNumber(auth, phone, window.recaptchaVerifier);
+  document.getElementById('otp').classList.remove('hidden');
+  document.getElementById('verify-otp-btn').classList.remove('hidden');
+};
+
+// Verify OTP
+document.getElementById('verify-otp-btn').onclick = async () => {
+  const code = document.getElementById('otp').value.trim();
+  if (!code) return alert("Enter OTP");
+  try {
+    const result = await confirmationResult.confirm(code);
+    currentUser = result.user;
+    await setDoc(doc(db, "users", currentUser.uid), {
+      uid: currentUser.uid,
+      phone: currentUser.phoneNumber,
+      name: currentUser.phoneNumber
+    });
+  } catch(e) {
+    document.getElementById('auth-error').innerText = e.message;
+  }
+};
+
+// Auth State Listener
+onAuthStateChanged(auth, (user) => {
+  if (user) {
+    currentUser = user;
+    document.getElementById('auth-screen').classList.add('hidden');
+    document.getElementById('app-screen').classList.remove('hidden');
+    document.getElementById('my-name').innerText = user.phoneNumber;
+    document.getElementById('my-avatar').innerText = user.phoneNumber.slice(-2);
+    loadUsers();
+  } else {
+    currentUser = null;
+    document.getElementById('auth-screen').classList.remove('hidden');
+    document.getElementById('app-screen').classList.add('hidden');
+  }
+});
+
+window.logout = () => signOut(auth);
+
+// Load Users
+async function loadUsers() {
+  const querySnapshot = await getDocs(collection(db, "users"));
+  const userList = document.getElementById('user-list');
+  userList.innerHTML = "";
+  querySnapshot.forEach((userDoc) => {
+    const data = userDoc.data();
+    if (data.uid !== currentUser.uid) {
+      const div = document.createElement('div');
+      div.className = "flex items-center p-3 cursor-pointer hover:bg-gray-100 border-b";
+      div.innerHTML = `
+        <div class="w-12 h-12 bg-gray-300 rounded-full flex items-center justify-center text-white font-bold mr-3">${data.phone.slice(-2)}</div>
+        <div class="flex-1">
+          <h4 class="font-semibold text-gray-800">${data.name}</h4>
+          <p class="text-xs text-gray-500 truncate">${data.phone}</p>
+        </div>
+      `;
+      div.onclick = () => selectUser(data);
+      userList.appendChild(div);
+    }
+  });
+}
+
+// Select User
+window.selectUser = (targetUser) => {
+  selectedUserId = targetUser.uid;
+  document.getElementById('no-chat-selected').classList.add('hidden');
+  document.getElementById('chat-header').classList.remove('hidden');
+  document.getElementById('input-area').classList.remove('hidden');
+  document.getElementById('target-name').innerText = targetUser.name;
+  document.getElementById('target-avatar').innerText = targetUser.phone.slice(-2);
+
+  document.getElementById('sidebar').classList.add('hidden', 'md:flex');
+  document.getElementById('chat-window').classList.remove('hidden');
+
+  loadMessages();
+};
+
+window.backToSidebar = () => {
+  document.getElementById('sidebar').classList.remove('hidden');
+  document.getElementById('chat-window').classList.add('hidden', 'md:flex');
+};
+
+// Load Messages
+function loadMessages() {
+  if (unsubscribeMessages) unsubscribeMessages();
+
+  const chatId = [currentUser.uid, selectedUserId].sort().join('_');
+  const q = query(collection(db, "messages"), where("chatId", "==", chatId), orderBy("timestamp", "asc"));
+  const container = document.getElementById('messages-container');
+
+  unsubscribeMessages = onSnapshot(q, (snapshot) => {
+    container.innerHTML = "";
+    snapshot.forEach((doc) => {
+      const msg = doc.data();
+      const isMe = msg.senderId === currentUser.uid;
+      const div = document.createElement('div');
+      div.className = `flex ${isMe ? 'justify-end' : 'justify-start'} mb-1`;
+      div.innerHTML = `
+        <div class="max-w-[70%] px-3 py-1.5 rounded-lg text-sm ${isMe ? 'bg-[#dcf8c6]' : 'bg-white'}">
+          <p class="break-words">${msg.text}</p>
+          <p class="text-[10px] text-gray-500 text-right mt-1">${msg.timestamp ? new Date(msg.timestamp.toDate()).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '...'}</p>
+        </div>
+      `;
+      container.appendChild(div);
+    });
+    container.scrollTop = container.scrollHeight;
+  });
+}
+
+// Send Message
+window.sendMessage = async () => {
+  const input = document.getElementById('msg-input');
+  const text = input.value.trim();
+  if (!text || !selectedUserId) return;
+
+  const chatId = [currentUser.uid, selectedUserId].sort().join('_');
+  input.value = "";
+
+  try {
+    await addDoc(collection(db, "messages"), {
+      chatId: chatId,
+      senderId: currentUser.uid,
+      receiverId: selectedUserId,
+      text: text,
+      timestamp: serverTimestamp()
+    });
+  } catch(e) { console.error(e); }
+};
+
+document.getElementById('msg-input').addEventListener('keypress', (e) => { if(e.key==='Enter') sendMessage(); });
+</script>
+</body>
+</html>
